@@ -1589,7 +1589,7 @@ class CommandManager:
         if not chunks:
             return True
         rate_limit_seconds = self.bot.config.getfloat('Bot', 'bot_tx_rate_limit_seconds', fallback=1.0)
-        sleep_time = max(rate_limit_seconds + 0.5, 1.0)
+        sleep_time = max(rate_limit_seconds + 1.5, 1.0)
         for i, chunk in enumerate(chunks):
             if i > 0:
                 await self.bot.bot_tx_rate_limiter.wait_for_tx()
