@@ -842,6 +842,7 @@ class WxCommand(BaseCommand):
                 rate_limit = self.bot.config.getfloat('Bot', 'bot_tx_rate_limit_seconds', fallback=1.0)
                 # Use a conservative sleep time to avoid rate limiting
                 sleep_time = max(rate_limit + 1.0, 2.0)  # At least 2 seconds, or rate_limit + 1 second
+                await self.bot.bot_tx_rate_limiter.wait_for_tx()
                 await asyncio.sleep(sleep_time)
 
                 # Send the special weather statement (already formatted with prioritization)
