@@ -2874,9 +2874,10 @@ class WxCommand(BaseCommand):
 
         # Send all messages (per-user rate limit applies only to first; skip for continuations)
         for i, msg in enumerate(messages):
-            await self.send_response(message, msg, skip_user_rate_limit=(i > 0))
-            if i < len(messages) - 1:
+            if i > 0:
+                await self.bot.bot_tx_rate_limiter.wait_for_tx()
                 await asyncio.sleep(sleep_time)
+            await self.send_response(message, msg, skip_user_rate_limit=(i > 0))
 
     def abbreviate_alert_title(self, title: str) -> str:
         """Abbreviate alert title for brevity"""
