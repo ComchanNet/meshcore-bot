@@ -1455,13 +1455,22 @@ long_jokes = false
 enabled = false
 [Multitest_Command]
 # Response format for multitest command results
-# Available fields: {sender}, {path_count}, {paths}, {listening_duration}
-# {sender}: Name/ID of message sender
+# Multitest's own fields: {path_count}, {paths}, {listening_duration}
 # {path_count}: Number of unique paths found
-# {paths}: Newline-separated list of paths
+# {paths}: Newline-separated list of paths (laid out per condense_paths below)
 # {listening_duration}: Listening window duration in seconds
-# Leave empty to use default format
+# Plus the same message placeholders and pipe filters as [Test_Command] response_format,
+# describing the TRIGGERING message: {sender}, {connection_info}, {path}, {hops},
+# {hops_label}, {timestamp}, {snr}, {rssi}, {packet_hash}. See the [Test_Command]
+# response_format comments for the filter list (pathbytes_min, hops_min,
+# prefix_if_nonempty, if_nonempty/if_notempty, shorten/shorten_url) and the quoting rules.
+# Leave empty to use default format: Paths({path_count}):\n{paths}
 # Example: "Found {path_count} unique path(s) for @[{sender}]:\n{paths}"
+# Example with a packet link that disappears when RF correlation failed:
+# response_format = @[{sender}] {path_count} path(s):\n{paths}{packet_hash|if_notempty:"\nhttps://scope.example.net/#/packets/{packet_hash}"|shorten}
+# NOTE: this field is no longer plain str.format, so {{ }} for a literal brace and
+# format specs such as {path_count:03d} are not interpreted; an unknown placeholder
+# renders as nothing instead of making the whole reply fall back to the default.
 response_format = @[{sender}] found {path_count} unique path(s):\n{paths}
 # condense_paths: false = one full path per line; true = flat condensed tree (default); nested = indented ├/└ under ┐ sub-blocks (uses ASCII spaces, not U+2502, to save bytes vs old │).
 condense_paths = true

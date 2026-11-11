@@ -1,4 +1,4 @@
-"""Tests for modules.commands.multitest_command — pure logic functions."""
+"""Tests for modules.commands.multitest_command — pure logic and reply rendering."""
 
 import configparser
 from unittest.mock import MagicMock, Mock
@@ -484,3 +484,86 @@ class TestParseCondensePathsMode:
         assert _parse_condense_paths_mode("TRUE") == "flat"
         assert _parse_condense_paths_mode("nested") == "nested"
         assert _parse_condense_paths_mode("flat") == "flat"
+
+
+class TestRenderReply:
+    """The reply template: same piped placeholders and filters as the test reply."""
+
+    def _cmd(self, response_format=None):
+        bot = _make_bot()
+        if response_format is not None:
+            bot.config.set("Multitest_Command", "response_format", response_format)
+        return MultitestCommand(bot)
+
+    def _message(self):
+        return mock_message(
+            content="mt",
+            sender_id="Alice",
+            hops=2,
+            snr=9.5,
+            rssi=-98,
+            routing_info={
+                "path_length": 2,
+                "path_nodes": ["a1b2", "c3d4"],
+                "bytes_per_hop": 2,
+                "packet_hash": "3F2A9C1B7E4D0A65",
+            },
+        )
+
+    async def _render(self, cmd, template):
+        return await cmd._render_reply(
+            self._message(),
+            template,
+            paths_text="a1b2,c3d4\na1b2,e5f6",
+            path_count=2,
+            listening_duration=6,
+        )
+
+    async def test_blank_config_renders_the_default_format(self):
+        cmd = self._cmd()
+        assert cmd.response_format is None
+        out = await self._render(cmd, cmd.DEFAULT_FORMAT)
+        assert out == "Paths(2):\na1b2,c3d4\na1b2,e5f6"
+
+    async def test_own_fields_and_sender(self):
+        cmd = self._cmd()
+        out = await self._render(cmd, "@[{sender}] {path_count} in {listening_duration}s:\n{paths}")
+        assert out == "@[Alice] 2 in 6s:\na1b2,c3d4\na1b2,e5f6"
+
+    async def test_message_placeholders_describe_the_triggering_message(self):
+        cmd = self._cmd()
+        out = await self._render(cmd, "{hops_label} | {path} | {snr} | {packet_hash}")
+        assert out == "2 hops | a1b2,c3d4 (2 hops) | 9.5 | 3F2A9C1B7E4D0A65"
+
+    async def test_filters_gate_a_clause(self):
+        cmd = self._cmd()
+        out = await self._render(
+            cmd, "{path_count}{packet_hash|if_notempty:\"#{packet_hash}\"|prefix_if_nonempty: }"
+        )
+        assert out == "2 #3F2A9C1B7E4D0A65"
+
+    async def test_pathbytes_min_clears_on_a_one_byte_path(self):
+        cmd = self._cmd()
+        message = mock_message(
+            content="mt", sender_id="Alice", hops=2,
+            routing_info={"path_length": 2, "path_nodes": ["a1", "c3"], "bytes_per_hop": 1},
+        )
+        out = await cmd._render_reply(
+            message, "{path_count}{paths|pathbytes_min:2|prefix_if_nonempty: }",
+            paths_text="a1,c3", path_count=1, listening_duration=6,
+        )
+        assert out == "1"
+
+    async def test_unknown_placeholder_renders_as_nothing(self):
+        cmd = self._cmd()
+        out = await self._render(cmd, "{path_count} via {nope}")
+        assert out == "2 via "
+
+    async def test_escape_sequences_decoded_from_config(self):
+        cmd = self._cmd('"@[{sender}]\\n{paths}"')
+        assert cmd.response_format == "@[{sender}]\n{paths}"
+
+    async def test_escapes_decoded_beside_a_non_latin1_character(self):
+        """The old unicode_escape route raised here and left \\n literal."""
+        cmd = self._cmd("🛰\\n{paths}")
+        assert cmd.response_format == "🛰\n{paths}"

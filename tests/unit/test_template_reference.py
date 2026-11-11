@@ -88,9 +88,21 @@ class TestCatalogMatchesTheEngine:
         assert {p["name"] for p in spec["placeholders"]} == set(JSON_TEMPLATE_PLACEHOLDERS)
 
     def test_format_fields_offer_no_filters(self):
-        spec = _field(MultitestCommand, "response_format")["template"]
+        spec = _field(GreeterCommand, "greeting_message")["template"]
         assert spec["syntax"] == "format"
         assert "filters" not in spec
+
+    def test_multitest_reply_is_piped_with_its_own_counts(self):
+        spec = _field(MultitestCommand, "response_format")["template"]
+        assert spec["syntax"] == "piped"
+        assert spec["filters"] is PIPED_FILTERS
+        assert [p["name"] for p in spec["placeholders"]] == [
+            *MESSAGE_PLACEHOLDERS, "path_count", "paths", "listening_duration",
+        ]
+
+    def test_multitest_blank_default_is_the_command_default(self):
+        spec = _field(MultitestCommand, "response_format")["template"]
+        assert spec["blank_default"] == MultitestCommand.DEFAULT_FORMAT
 
     def test_every_template_field_has_a_preview(self):
         from modules.settings_schema import build_plugin_settings_view
@@ -203,17 +215,25 @@ class TestFormatPreviews:
         assert row["output"] == "\n\n57 repeaters"
 
     def test_multitest_blank_is_the_default_format(self):
-        (row,) = _preview(MultitestCommand, "response_format", "")
-        assert row["output"].startswith("Paths(3):\n")
+        out = _by_id(_preview(MultitestCommand, "response_format", ""))
+        assert out["direct"].startswith("Paths(3):\n")
 
-    def test_multitest_bad_template_falls_back_to_the_default(self):
-        (row,) = _preview(MultitestCommand, "response_format", "{nope}")
-        assert row["output"].startswith("Paths(3):\n")
-        assert "default format" in row["error"]
+    def test_multitest_unknown_placeholder_renders_as_nothing(self):
+        """Piped syntax, so a typo drops that clause instead of the whole template."""
+        out = _by_id(_preview(MultitestCommand, "response_format", "{path_count} via {nope}"))
+        assert out["direct"] == "3 via "
 
     def test_multitest_decodes_like_the_command(self):
-        (row,) = _preview(MultitestCommand, "response_format", '"{path_count}\\n{listening_duration}s"')
-        assert row["output"] == "3\n6s"
+        out = _by_id(_preview(MultitestCommand, "response_format", '"{path_count}\\n{listening_duration}s"'))
+        assert out["direct"] == "3\n6s"
+
+    def test_multitest_takes_the_message_fields_and_filters(self):
+        out = _by_id(_preview(
+            MultitestCommand, "response_format",
+            "{path_count}{packet_hash|prefix_if_nonempty: #}{hops|hops_min:1|prefix_if_nonempty: via }",
+        ))
+        assert out["multibyte"] == "3 #3F2A9C1B7E4D0A65 via 3"
+        assert out["direct"] == "3 #3F2A9C1B7E4D0A65"
 
     def test_mqtt_format_spec_fails_on_a_missing_reading(self):
         full, partial = _preview(MqttWeatherService, "json_template", "{humidity:.0f}%")
@@ -248,8 +268,9 @@ class TestCodexReviewFixes:
         assert "built-in default" in result["note"]
 
     def test_quoted_empty_multitest_format_is_the_default(self):
-        (row,) = _preview(MultitestCommand, "response_format", '""')
-        assert row["output"].startswith("Paths(3):\n")
+        result = _render_preview(_field(MultitestCommand, "response_format")["template"], '""')
+        assert _by_id(result["scenarios"])["direct"].startswith("Paths(3):\n")
+        assert "built-in default" in result["note"]
 
     def test_multitest_follows_the_saved_path_layout(self):
         spec = _field(MultitestCommand, "response_format")["template"]

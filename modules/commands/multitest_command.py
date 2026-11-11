@@ -9,13 +9,14 @@ import re
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 CondensePathsMode = Literal["off", "flat", "nested"]
 
 from ..models import MeshMessage
-from ..template_reference import template_spec
-from ..utils import calculate_packet_hash, parse_path_string
+from ..response_template import format_piped_template_async
+from ..template_reference import MESSAGE_PLACEHOLDERS, template_spec
+from ..utils import calculate_packet_hash, decode_escape_sequences, parse_path_string
 from .base_command import BaseCommand
 
 _BRANCH_INTER = "\u251c"  # ├ (intermediate branch)
@@ -474,17 +475,26 @@ class MultitestCommand(BaseCommand):
     usage = "multitest"
     examples = ["multitest", "mt"]
 
+    # Reply used when response_format is blank. Rendered through the same piped
+    # engine as a configured template, so the two cannot drift apart.
+    DEFAULT_FORMAT = "Paths({path_count}):\n{paths}"
+
     # Web-viewer settings schema (see modules/settings_schema.py)
     settings_schema = [
         {"key": "response_format", "label": "Response format", "type": "str",
          "default": "",
          "help": "Result template. Empty = default.",
-         "template": template_spec("format", {
-             "sender": "Sender's name",
-             "path_count": "Number of unique paths heard",
-             "paths": "The paths, laid out per Path layout",
-             "listening_duration": "Seconds the bot listened",
-         }, notes=["\\n starts a new line."], preview="multitest")},
+         "template": template_spec(
+             "piped",
+             MESSAGE_PLACEHOLDERS + ("path_count", "paths", "listening_duration"),
+             notes=[
+                 "The message placeholders describe the triggering message, the one "
+                 "whose packet the bot listened for.",
+                 "\\n starts a new line.",
+             ],
+             blank_default=DEFAULT_FORMAT,
+             preview="multitest",
+         )},
         {"key": "condense_paths", "label": "Path layout", "type": "enum",
          "options": [
              {"value": "true", "label": "Condensed tree (default)"},
@@ -523,13 +533,11 @@ class MultitestCommand(BaseCommand):
         if response_format and response_format.strip():
             # Strip quotes if present (config parser may add them)
             response_format = self._strip_quotes_from_config(response_format).strip()
-            # Decode escape sequences (e.g., \n -> newline)
-            try:
-                # Use encode/decode to convert escape sequences to actual characters
-                self.response_format = response_format.encode('latin-1').decode('unicode_escape')
-            except (UnicodeDecodeError, UnicodeEncodeError):
-                # If decoding fails, use as-is (fallback)
-                self.response_format = response_format
+            # Decode escape sequences (e.g. \n -> newline) the way every other
+            # response template does. The old encode('latin-1') route also read
+            # \uXXXX, but it raised on any non-latin-1 character, so one emoji in
+            # the template left every \n in it literal.
+            self.response_format = decode_escape_sequences(response_format)
         else:
             self.response_format = None  # Use default format
 
@@ -847,6 +855,50 @@ class MultitestCommand(BaseCommand):
         except Exception as e:
             self.logger.debug(f"Error scanning recent RF data for user {session.user_id}: {e}")
 
+    async def _render_reply(
+        self,
+        message: MeshMessage,
+        template: str,
+        *,
+        paths_text: str,
+        path_count: int,
+        listening_duration: int,
+    ) -> str:
+        """Render the result template, off the event loop.
+
+        Takes the same placeholders and ``|filter`` chains as the test reply and
+        the path reply prefix: every standard message field (``{packet_hash}``,
+        ``{path}``, ``{hops}``, ``{snr}``, ...) describing the *triggering*
+        message, plus this command's ``{path_count}``, ``{paths}`` and
+        ``{listening_duration}``. An unknown placeholder renders as nothing, the
+        way it does in the other piped templates.
+
+        Async because a ``shorten`` filter makes a blocking HTTP call, which
+        rendered inline would stall radio RX and every other handler for its
+        whole timeout.
+        """
+        default = f"Paths({path_count}):\n{paths_text}"
+        try:
+            fields: dict[str, Any] = self.get_standard_placeholder_fields(message)
+            fields.update({
+                'sender': message.sender_id or "Unknown",
+                'path_count': path_count,
+                'paths': paths_text,
+                'listening_duration': listening_duration,
+            })
+            return await format_piped_template_async(
+                template,
+                {k: str(v) for k, v in fields.items()},
+                message=message,
+                logger=self.logger,
+                config=self.bot.config,
+                prefix_hex_chars=getattr(self.bot, 'prefix_hex_chars', 2),
+            )
+        except (KeyError, ValueError) as e:
+            # Fall back to the plain path list rather than dropping the reply.
+            self.logger.debug(f"Error formatting multitest response: {e}, using default format")
+            return default
+
     async def execute(self, message: MeshMessage) -> bool:
         """Execute the multitest command"""
         user_id = message.sender_id or "unknown"
@@ -981,22 +1033,15 @@ class MultitestCommand(BaseCommand):
                 paths_text = "\n".join(sorted_paths)
             path_count = len(sorted_paths)
 
-            # Use configured format if available, otherwise use default
-            if self.response_format:
-                try:
-                    response = self.response_format.format(
-                        sender=message.sender_id or "Unknown",
-                        path_count=path_count,
-                        paths=paths_text,
-                        listening_duration=int(session.listening_duration)
-                    )
-                except (KeyError, ValueError) as e:
-                    # If formatting fails, fall back to default
-                    self.logger.debug(f"Error formatting multitest response: {e}, using default format")
-                    response = f"Paths({path_count}):\n{paths_text}"
-            else:
-                # Default format
-                response = f"Paths({path_count}):\n{paths_text}"
+            # Configured template or the built-in default; both take the same
+            # placeholders and filters, and both render the same way.
+            response = await self._render_reply(
+                message,
+                self.response_format or self.DEFAULT_FORMAT,
+                paths_text=paths_text,
+                path_count=path_count,
+                listening_duration=int(session.listening_duration),
+            )
         else:
             # Provide more helpful error message with diagnostic info
             matching_packets = 0
